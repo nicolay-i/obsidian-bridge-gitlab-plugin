@@ -1,13 +1,46 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import {App, MarkdownView, Notice, Plugin, PluginSettingTab, request, RequestUrlParam, Setting} from 'obsidian';
+import { requestUrl } from 'obsidian';
 
 // Remember to rename these classes and interfaces!
 
 interface GitlabBridgePluginSettings {
-	mySetting: string;
+	gitlabWebProjectUrl: string;
+	hostGitlab: string;
+	privateToken: string;
+	groupSlug: string;
+	projectSlug: string;
 }
 
 const DEFAULT_SETTINGS: GitlabBridgePluginSettings = {
-	mySetting: 'default'
+	gitlabWebProjectUrl: 'https://gitlab.com',
+	hostGitlab: '',
+	privateToken: '',
+	groupSlug: '',
+	projectSlug: ''
+}
+
+function parseGitlabUrl(url: string): { groupSlug: string, projectSlug: string, host: string } {
+	try {
+		const urlObj = new URL(url);
+		const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
+		
+		if (pathParts.length < 2) {
+			throw new Error('Invalid GitLab project URL format');
+		}
+
+		return {
+			groupSlug: pathParts[0],
+			projectSlug: pathParts[1],
+			host:  urlObj.origin
+		};
+	} catch (error) {
+		console.error('Error parsing GitLab URL:', error);
+		return {
+			groupSlug: '',
+			projectSlug: '',
+			host: ''
+		};
+	}
 }
 
 export default class GitlabBridgePlugin extends Plugin {
@@ -16,66 +49,146 @@ export default class GitlabBridgePlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
+		// Добавляем команды в соответствии с документацией
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
+			id: 'share-to-gitlab-wiki',
+			name: 'Share note to GitLab Wiki',
 			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
+				const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (view?.file) {
 					if (!checking) {
-						new SampleModal(this.app).open();
+						this.shareToGitlabWiki(view);
 					}
-
-					// This command will only show up in Command Palette when the check function returns true
 					return true;
 				}
+				return false;
 			}
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
+		this.addCommand({
+			id: 'get-gitlab-wiki-link',
+			name: 'Get GitLab Wiki link',
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (view?.file) {
+					if (!checking) {
+						this.getWikiLink(view);
+					}
+					return true;
+				}
+				return false;
+			}
 		});
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		this.addCommand({
+			id: 'delete-from-gitlab-wiki',
+			name: 'Delete note from GitLab Wiki',
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (view?.file) {
+					if (!checking) {
+						this.deleteFromWiki(view);
+					}
+					return true;
+				}
+				return false;
+			}
+		});
+
+		this.addSettingTab(new GitlabSettingTab(this.app, this));
+	}
+
+	private getApiUrl(): string {
+		return `${this.settings.hostGitlab}/api/v4/projects/${encodeURIComponent(this.settings.groupSlug)}%2F${encodeURIComponent(this.settings.projectSlug)}/wikis`;
+	}
+
+	private async shareToGitlabWiki(view: MarkdownView): Promise<void> {
+		try {
+			if (!view.file) return;
+
+			const title = view.file.basename;
+			const content = await this.app.vault.read(view.file);
+			const url = this.getApiUrl();
+
+			// Check if page exists
+			try {
+				await requestUrl({
+					url: `${url}/${encodeURIComponent(title)}`,
+					headers: {
+						'PRIVATE-TOKEN': this.settings.privateToken
+					}
+				});
+				
+				// If page exists, update it
+				await requestUrl({
+					url: `${url}/${encodeURIComponent(title)}`,
+					method: 'PUT',
+					headers: {
+						'PRIVATE-TOKEN': this.settings.privateToken,
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify({
+						format: 'markdown',
+						title: title,
+						content: content
+					})
+				});
+			} catch (error) {
+				// If page doesn't exist, create new one
+				const requestParams: RequestUrlParam = {
+					url: `${url}`,
+					method: 'POST',
+					contentType: 'application/json',
+					headers: {
+						'PRIVATE-TOKEN': this.settings.privateToken
+					},
+					body: JSON.stringify({
+						format: 'markdown',
+						title: title,
+						content: content
+					}),
+					throw: false
+				}
+
+				const result = await requestUrl(requestParams);
+				console.log({result})
+			}
+
+			const wikiUrl = `${this.settings.gitlabWebProjectUrl}/${this.settings.groupSlug}%2F${this.settings.projectSlug}/-/wikis/${encodeURIComponent(title)}`;
+			await navigator.clipboard.writeText(wikiUrl);
+			new Notice('Successfully shared to GitLab Wiki! Link copied to clipboard.');
+		} catch (error) {
+			new Notice(`Error: ${error.message}`);
+			console.error('GitLab Wiki error:', error);
+		}
+	}
+
+	private async getWikiLink(view: MarkdownView): Promise<void> {
+		if (!view.file) return;
+		const title = view.file.basename;
+		const wikiUrl = `${this.settings.gitlabWebProjectUrl}/${this.settings.groupSlug}%2F${this.settings.projectSlug}/-/wikis/${encodeURIComponent(title)}`;
+		await navigator.clipboard.writeText(wikiUrl);
+		new Notice('Wiki link copied to clipboard!');
+	}
+
+	private async deleteFromWiki(view: MarkdownView): Promise<void> {
+		try {
+			if (!view.file) return;
+			const title = view.file.basename;
+
+			await requestUrl({
+				url: `${this.getApiUrl()}/${encodeURIComponent(title)}`,
+				method: 'DELETE',
+				headers: {
+					'PRIVATE-TOKEN': this.settings.privateToken
+				}
+			});
+
+			new Notice('Successfully deleted from GitLab Wiki!');
+		} catch (error) {
+			new Notice(`Error: ${error.message}`);
+			console.error('GitLab Wiki deletion error:', error);
+		}
 	}
 
 	onunload() {
@@ -84,6 +197,11 @@ export default class GitlabBridgePlugin extends Plugin {
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		// Обновляем slugs при загрузке настроек
+		const { groupSlug, projectSlug, host } = parseGitlabUrl(this.settings.gitlabWebProjectUrl);
+		this.settings.groupSlug = groupSlug;
+		this.settings.projectSlug = projectSlug;
+		this.settings.hostGitlab = host;
 	}
 
 	async saveSettings() {
@@ -91,23 +209,7 @@ export default class GitlabBridgePlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
+class GitlabSettingTab extends PluginSettingTab {
 	plugin: GitlabBridgePlugin;
 
 	constructor(app: App, plugin: GitlabBridgePlugin) {
@@ -117,18 +219,39 @@ class SampleSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const {containerEl} = this;
-
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('GitLab Project URL')
+			.setDesc('URL of your GitLab project (example: https://gitlab.com/group/project)')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('https://gitlab.com/group/project')
+				.setValue(this.plugin.settings.gitlabWebProjectUrl)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.gitlabWebProjectUrl = value;
+					// Automatically update slugs when URL changes
+					const { groupSlug, projectSlug, host: domain } = parseGitlabUrl(value);
+					this.plugin.settings.groupSlug = groupSlug;
+					this.plugin.settings.projectSlug = projectSlug;
+					this.plugin.settings.hostGitlab = domain;
 					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Private Token')
+			.setDesc('Your GitLab Private Token. Set token name (example: Obsidian Plugin) and select scopes: api, read_repository, write_repository')
+			.addText(text => text
+				.setPlaceholder('Enter your private token')
+				.setValue(this.plugin.settings.privateToken)
+				.onChange(async (value) => {
+					this.plugin.settings.privateToken = value;
+					await this.plugin.saveSettings();
+				}))
+			.addButton(button => button
+				.setButtonText('Generate')
+				.onClick(() => {
+					const link = `https://${this.plugin.settings.hostGitlab}/${this.plugin.settings.groupSlug}/${this.plugin.settings.projectSlug}/-/settings/access_tokens?name=Obsidian+Plugin&scopes=api,read_repository,write_repository`
+					window.open(link, '_blank');
 				}));
 	}
 }

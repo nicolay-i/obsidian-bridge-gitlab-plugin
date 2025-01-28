@@ -19,7 +19,7 @@
     ],
     "types": ["node"],
     "paths": {
-      "obsidian": ["node_modules/obsidian/dist/obsidian.d.ts"]
+      // "obsidian": ["node_modules/obsidian/dist/obsidian.d.ts"]
     }
   },
   "include": [
