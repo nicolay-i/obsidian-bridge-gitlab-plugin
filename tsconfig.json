@@ -16,7 +16,11 @@
       "ES5",
       "ES6",
       "ES7"
-    ]
+    ],
+    "types": ["node"],
+    "paths": {
+      "obsidian": ["node_modules/obsidian/dist/obsidian.d.ts"]
+    }
   },
   "include": [
     "**/*.ts"
